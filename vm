@@ -1,0 +1,229 @@
+#!/bin/sh
+
+usage() {
+	printf "Usage: vm[-ehvw][-m ram_size] dir_name\n"
+	printf "vm[-ehvw][-m ram_size][-d iso_name]-s disk_size create [dir_name]\n"	
+	printf "vm [-f] update\n"
+	printf "vm clear\n"
+	printf "vm help\n"
+	printf "vm version\n"
+	exit 2
+}
+
+version() {
+	printf "vm utility 0.1.0\n"
+	exit 2
+}
+
+retrieve_url() {
+	if [ ! -e ./cache ]
+	then
+		mkdir ./cache
+	fi
+	if command -v curl >/dev/null 2>&1
+	then
+		echo "./cache/${1}.iso"
+		curl -o "./cache/${1}.iso" "$2"
+	elif command -v wget >/dev/null 2>&1
+	then
+		wget -O "./cache/${1}.iso" "$2"
+	else
+		echo "Error unabled to find either curl or wget" >&2
+		exit 1
+	fi
+}
+
+update_repo() {
+    if [ -e repo.conf ]
+	then
+        while IFS=' ' read -r n u
+        do
+			if [ -e cache/${n}.iso -a -z "$fflag" ]
+			then
+				printf "File %s.iso is already in the cache skipping\n" $n
+				printf "Use -f to force an update\n"
+			else
+				printf "Fetching %s.iso from %s...\n" $n $u
+	            retrieve_url $n $u	
+			fi
+        done <repo.conf
+    else
+        printf "Error repo.conf not found"
+    fi
+}
+
+ask() {
+    while :
+    do
+        printf "%s" "$@" ' '
+        read answer
+        case "$answer" in
+        	y)  return 0
+				;;
+        	n)  return 1
+				;;
+        esac
+	done
+}
+
+clear_cache() {
+    if ask "This will delete all iso files in the cache. Continue? [y/n]"
+	then
+        rm ./cache/*.iso
+    else
+        printf "Aborted\n"
+    fi
+}
+
+eflag=
+dflag=
+mflag=
+sflag=
+fflag=
+wflag=
+ram=
+while getopts efd:m:s:hvw name
+do
+	case $name in
+		e)	eflag=1
+			;;
+		d)	dflag=1
+			iso="$OPTARG"
+			;;
+		m)	mflag=1
+			ram="$OPTARG"
+			;;
+		s)	sflag=1
+			size="$OPTARG"
+			;;
+		f)	fflag=1
+			;;
+		h)  usage
+			;;
+		v)	version
+			;;
+		w)	wflag=1
+			;;
+		?) 	usage
+			;;		
+	esac
+done
+shift $(($OPTIND - 1))
+cmd=$1
+dir=$2
+
+efi=""
+if [ ! -z "$eflag" ]
+then
+	efi="-bios /usr/share/ovmf/OVMF.fd"
+fi
+
+if [ -z $cmd ]
+then
+	printf "Error directory operand is required\n"
+	exit 3
+fi
+
+rom=
+if [ "$cmd" = "create" ]
+then
+	if [ -z $2 -a -n "$dflag" ]
+	then
+		if ask "Directory name not given, would you like to use ${iso} [y/n]"
+		then
+			dir=$iso	
+		else
+			printf "Aborted\n"
+			exit 5
+		fi
+	elif [ -z $2 ]
+	then
+		printf "Directory name not given, aborting\n"
+		exit 5
+	fi
+	if [ -n "$sflag" ]
+	then
+		mkdir $dir
+		if [ -n "$dflag" ]
+		then
+			cd $dir
+			if [ -e "../cache/${iso}.iso" ]
+			then
+				rom="-cdrom ../cache/${iso}.iso"
+			else
+				printf "OS not found in cache please enter url in repo.conf\n"
+				exit 4
+			fi
+		elif [ -e cache/${dir}.iso ]
+		then
+			printf "Assuming iso name matches directory name %s\n" $dir
+			cd $dir
+			rom="-cdrom ../cache/${dir}.iso"
+		else 
+			printf "iso name not given, aborting\n"
+			exit 5
+		fi
+		if [ -e ${dir}.qcow2 ]
+		then
+			if ask "File ${dir}.qcow2 already exists would you like to overwrite it? [y/n]"
+			then
+				printf "Overwritting...\n"
+			else
+				printf "Aborting\n"
+				exit 5
+			fi
+		fi
+		qemu-img create -f qcow2 "${dir}.qcow2" "${size}G"
+	else
+		printf "Error -s flag is required with the create operand\n"
+		exit 5
+	fi
+elif [ "$cmd" = "update" ]
+then
+	update_repo
+    exit 0
+elif [ "$cmd" = "clear" ]
+then
+    clear_cache
+    exit 0
+elif [ "$cmd" = "help" ]
+then
+	usage
+elif [ "$cmd" = "version" ]
+then
+	version
+else
+	dir=$1
+	if [ -e $dir ]
+	then
+		rom=""
+		cd $dir
+	else
+		printf "Error directory %s not found\n" $dir
+		exit 5
+	fi
+fi
+
+drive="${dir}.qcow2"
+
+if [ ! -e $drive ]
+then
+	printf "Error file %s not found, is %s a vm directory?\n" $drive $dir
+	exit 5
+fi
+
+if [ -z "$ram" ]
+then
+	printf "Using default RAM size of 2048MiB\n"
+	ram=2
+fi
+
+ram=$((ram * 1024))
+
+ls
+if [ -z "$wflag" ]
+then
+	qemu-system-x86_64 -enable-kvm $efi -m $ram -nic user,model=virtio -drive file=$drive,media=disk,if=virtio $rom -display gtk
+else
+	qemu-system-x86_64 -enable-kvm -boot d -m $ram -hda $drive $rom -soundhw all -vga std -net nic,model=e1000 -net user -display gtk
+fi
